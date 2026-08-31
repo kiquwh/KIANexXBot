@@ -60,9 +60,10 @@ async function railwayRequest(token, query, variables = {}) {
     return response.data?.data;
 }
 
-// معتبرسازی توکن ریلی‌وی و دریافت اطلاعات و Workspace کاربر
+// معتبرسازی توکن ریلی‌وی و پیدا کردن هوشمند Workspace ID
 async function validateRailwayToken(token) {
     try {
+        // روش اول: گرفتن اطلاعات از طریق query سطح کاربر (me)
         try {
             const data = await railwayRequest(token, `
                 query {
@@ -85,43 +86,40 @@ async function validateRailwayToken(token) {
                     workspaceName: workspaces[0].name
                 };
             }
+        } catch (_) {}
 
-            if (me) {
+        // روش دوم: گرفتن مستقیم Workspaceها برای توکن‌های تیمی یا اکانت‌های خاص
+        try {
+            const data = await railwayRequest(token, `
+                query {
+                    workspaces { id name }
+                }
+            `);
+
+            const workspaces = data?.workspaces || [];
+            if (workspaces.length > 0) {
                 return {
                     valid: true,
-                    email: me.email || 'user@railway.app',
-                    workspaceId: null,
-                    workspaceName: null
+                    email: 'Railway Workspace',
+                    workspaceId: workspaces[0].id,
+                    workspaceName: workspaces[0].name
                 };
             }
         } catch (_) {}
 
-        const data = await railwayRequest(token, `
-            query {
-                workspaces { id name }
-            }
-        `);
-
-        const workspaces = data?.workspaces || [];
-        if (workspaces.length > 0) {
-            return {
-                valid: true,
-                email: 'Railway Workspace',
-                workspaceId: workspaces[0].id,
-                workspaceName: workspaces[0].name
-            };
-        }
-
-        return { valid: false, error: 'هیچ Workspace قابل دسترسی برای این توکن پیدا نشد.' };
+        return { 
+            valid: false, 
+            error: 'توکن معتبر است اما هیچ Workspace (تیم) فعالی برای آن یافت نشد. لطفاً از بخش Account Settings در ریلی‌وی یک توکن با دسترسی کامل بسازید.' 
+        };
     } catch (e) {
         return {
             valid: false,
-            error: e.message || 'توکن Railway نامعتبر است یا دسترسی کافی ندارد.'
+            error: e.message || 'توکن Railway نامعتبر است یا دسترسی کافی ندارد[cite: 1].'
         };
     }
 }
 
-// تابع ساخت واقعی و قدم‌به‌قدم روی ریلی‌وی
+// تابع ساخت پروژه روی ریلی‌وی
 async function deployLuffyPanelToRailway(userTokenObj, ctx) {
     const token = userTokenObj.railwayToken;
     const headers = {
@@ -131,10 +129,10 @@ async function deployLuffyPanelToRailway(userTokenObj, ctx) {
 
     try {
         if (!userTokenObj.workspaceId) {
-            throw new Error('برای این توکن هیچ Workspace ID پیدا نشد. یک Account/Workspace API Token با دسترسی Workspace استفاده کنید.');
+            throw new Error('برای این توکن هیچ Workspace ID پیدا نشد. لطفا توکنی با دسترسی به Workspace وارد کنید[cite: 1].');
         }
 
-        // گام ۱: ساخت پروژه در Workspace
+        // گام ۱: ساخت پروژه با استفاده از teamId (همان Workspace ID)
         await ctx.editMessageText('⏳ قدم ۱/۴: در حال ساخت پروژه جدید در حساب ریلی‌وی شما...');
 
         const projectName = `KIA-Nex-Panel-${Date.now()}`;
@@ -197,10 +195,6 @@ async function deployLuffyPanelToRailway(userTokenObj, ctx) {
                 { headers, timeout: 30000 }
             );
 
-            if (envRes.data?.errors?.length) {
-                throw new Error(envRes.data.errors.map(e => e.message).join(' | '));
-            }
-
             environmentId = envRes.data?.data?.project?.environments?.edges?.[0]?.node?.id || null;
         }
 
@@ -208,7 +202,7 @@ async function deployLuffyPanelToRailway(userTokenObj, ctx) {
             throw new Error('Environment پیش‌فرض Railway پیدا نشد.');
         }
 
-        // گام ۳: ساخت سرویس از GitHub
+        // گام ۳: ساخت سرویس از مخزن گیت‌هاب
         await ctx.editMessageText('⏳ قدم ۳/۴: در حال اتصال مخزن GitHub (LUFFY_PANEL)...');
 
         const serviceRes = await axios.post(
@@ -240,7 +234,7 @@ async function deployLuffyPanelToRailway(userTokenObj, ctx) {
             throw new Error('سرویس ساخته نشد یا Service ID دریافت نشد.');
         }
 
-        // گام ۴: تنظیم PORT و ساخت دامنه Railway
+        // گام ۴: تنظیم PORT و ساخت دامنه اختصاصی
         await ctx.editMessageText('⏳ قدم ۴/۴: تنظیم پورت و ساخت لینک نهایی...');
 
         try {
@@ -456,7 +450,7 @@ bot.on('text', async (ctx) => {
         });
         saveData(db);
 
-        return ctx.reply(`✅ توکن ریلی‌وی با موفقیت تایید شد!\n📧 ایمیل اکانت متصل: ${status.email}`,
+        return ctx.reply(`✅ توکن ریلی‌وی با موفقیت تایید شد!\n📧 ایمیل اکانت متصل: ${status.email}\n🏢 شناسه وایس‌ورک: ${status.workspaceId || 'ناشناس'}`,
             Markup.inlineKeyboard([
                 [Markup.button.callback('🔐 مدیریت توکن‌ها', 'manage_tokens')],
                 [Markup.button.callback('🏠 بازگشت به منوی اصلی', 'main_menu')]
