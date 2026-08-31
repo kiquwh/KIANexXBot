@@ -1,0 +1,13 @@
+{
+  "name": "kia-nex-bot",
+  "version": "1.0.0",
+  "description": "KIA Nex Telegram Bot",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.0",
+    "telegraf": "^4.16.3"
+  }
+}
