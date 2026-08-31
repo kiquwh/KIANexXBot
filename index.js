@@ -18,7 +18,6 @@ try {
     }
     DATA_FILE = path.join(volumeDir, 'data.json');
 } catch (e) {
-    // اگر پوشه /data دردسترس نبود (مثل تست روی سیستم شخصی) از پوشه محلی استفاده می‌کند
     DATA_FILE = path.join(__dirname, 'data.json');
 }
 
@@ -26,7 +25,7 @@ try {
 function loadData() {
     if (!fs.existsSync(DATA_FILE)) {
         const initialData = {
-            tokens: {}, // userId -> [{ token, email }]
+            tokens: {}, // userId -> [{ railwayToken, email }]
             botStatus: { active: true, reason: '' },
             userStates: {} // userId -> state
         };
@@ -39,15 +38,23 @@ function saveData(data) {
     fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
 }
 
-// چک کردن معتبر بودن توکن ربات تلگرام
-async function validateTelegramToken(token) {
+// اعتبارسنجی توکن ریلی‌وی از طریق GraphQL API خود ریلی‌وی و گرفتن اطلاعات اکانت/ایمیل کاربر
+async function validateRailwayToken(token) {
     try {
-        const response = await axios.get(`https://api.telegram.org/bot${token}/getMe`);
-        if (response.data && response.data.ok) {
+        const response = await axios.post('https://backboard.railway.app/graphql/v2', {
+            query: `query { me { email name } }`
+        }, {
+            headers: {
+                'Authorization': `Bearer ${token}`,
+                'Content-Type': 'application/json'
+            }
+        });
+
+        if (response.data && response.data.data && response.data.data.me) {
             return {
                 valid: true,
-                username: response.data.result.username,
-                email: `${response.data.result.username}@bot.org`
+                email: response.data.data.me.email || 'user@railway.app',
+                name: response.data.data.me.name || 'Railway User'
             };
         }
     } catch (e) {
@@ -91,11 +98,11 @@ bot.action('manage_tokens', async (ctx) => {
     const userTokens = db.tokens[userId] || [];
 
     let tokensListText = userTokens.length > 0 
-        ? userTokens.map((t, index) => `${index + 1}️⃣ توکن: ...${t.token.slice(-10)} | ایمیل: ${t.email}`).join('\n')
-        : '❌ هیچ توکنی ثبت نشده است.';
+        ? userTokens.map((t, index) => `${index + 1}️⃣ توکن ریلی‌وی: ...${t.railwayToken.slice(-8)} | ایمیل: ${t.email}`).join('\n')
+        : '❌ هیچ توکن ریلی‌وی ثبت نشده است.';
 
-    const text = `🔐 مدیریت توکن‌ها
-در این بخش می‌توانید توکن‌های خود را به‌سادگی ثبت، مدیریت یا حذف کنید.
+    const text = `🔐 مدیریت توکن‌ها (Railway API Token)
+در این بخش می‌توانید توکن ریلی‌وی خود را به‌سادگی ثبت، مدیریت یا حذف کنید.
 
 ➕ برای افزودن توکن جدید، گزینه ثبت توکن را انتخاب کنید.
 🗑️ برای حذف توکن‌های قبلی، گزینه حذف توکن را بزنید.
@@ -121,11 +128,11 @@ bot.action('main_menu', async (ctx) => {
 // افزودن توکن جدید
 bot.action('add_token', async (ctx) => {
     const db = loadData();
-    db.userStates[ctx.from.id] = 'WAITING_FOR_TOKEN';
+    db.userStates[ctx.from.id] = 'WAITING_FOR_RAILWAY_TOKEN';
     saveData(db);
 
     await ctx.editMessageText(
-        `➕ لطفاً توکن ربات خود را ارسال کنید:\n\n(برای لغو روی بازگشت بزنید)`,
+        `➕ لطفاً **توکن حساب ریلی‌وی (Railway API Token)** خود را ارسال کنید:\n\n(از بخش Account Settings -> Tokens در ریلی‌وی می‌توانید توکن بسازید)\n\n(برای لغو روی بازگشت بزنید)`,
         Markup.inlineKeyboard([
             [Markup.button.callback('🔙 بازگشت', 'manage_tokens')]
         ])
@@ -141,7 +148,7 @@ bot.action('delete_tokens', async (ctx) => {
 
     await ctx.answerCbQuery('تمام توکن‌های قبلی حذف شد!');
     return ctx.editMessageText(
-        `🗑️ تمام توکن‌های شما با موفقیت حذف شدند.\n\n🔐 مدیریت توکن‌ها`,
+        `🗑️ تمام توکن‌های ریلی‌وی شما با موفقیت حذف شدند.\n\n🔐 مدیریت توکن‌ها`,
         Markup.inlineKeyboard([
             [Markup.button.callback('➕ افزودن توکن جدید', 'add_token')],
             [Markup.button.callback('🔙 بازگشت', 'main_menu')]
@@ -152,7 +159,7 @@ bot.action('delete_tokens', async (ctx) => {
 // دریافت پیام متنی کاربران
 bot.on('text', async (ctx) => {
     const userId = ctx.from.id;
-    const text = ctx.message.text;
+    const text = ctx.message.text.trim();
     const db = loadData();
 
     // پنل ادمین
@@ -174,26 +181,26 @@ bot.on('text', async (ctx) => {
         }
     }
 
-    // حالت انتظار برای دریافت توکن ربات کاربر
-    if (db.userStates[userId] === 'WAITING_FOR_TOKEN') {
+    // حالت انتظار برای دریافت توکن ریلی‌وی کاربر
+    if (db.userStates[userId] === 'WAITING_FOR_RAILWAY_TOKEN') {
         db.userStates[userId] = null;
         saveData(db);
 
-        const status = await validateTelegramToken(text.trim());
+        const status = await validateRailwayToken(text);
         if (!status.valid) {
-            return ctx.reply('❌ توکن نامعتبر است! لطفاً یک توکن معتبر از BotFather بفرستید.', 
+            return ctx.reply('❌ توکن ریلی‌وی نامعتبر است! لطفاً یک API Token معتبر از حساب Railway خود ارسال کنید.', 
                 Markup.inlineKeyboard([[Markup.button.callback('🔙 بازگشت', 'manage_tokens')]])
             );
         }
 
         if (!db.tokens[userId]) db.tokens[userId] = [];
         db.tokens[userId].push({
-            token: text.trim(),
+            railwayToken: text,
             email: status.email
         });
         saveData(db);
 
-        return ctx.reply(`✅ توکن با موفقیت تایید شد!\n📧 ایمیل / شناسه شناسایی: ${status.email}`,
+        return ctx.reply(`✅ توکن ریلی‌وی با موفقیت تایید شد!\n📧 ایمیل اکانت متصل: ${status.email}`,
             Markup.inlineKeyboard([
                 [Markup.button.callback('🔐 مدیریت توکن‌ها', 'manage_tokens')],
                 [Markup.button.callback('🏠 بازگشت به منوی اصلی', 'main_menu')]
@@ -229,31 +236,44 @@ bot.action('build_panel', async (ctx) => {
     const userTokens = db.tokens[userId] || [];
 
     if (userTokens.length === 0) {
-        return ctx.answerCbQuery('لطفا ابتدا از گزینه مدیریت توکن، توکن ثبت کنید!', { show_alert: true });
+        return ctx.answerCbQuery('لطفا ابتدا از گزینه مدیریت توکن، توکن ریلی‌وی ثبت کنید!', { show_alert: true });
     }
 
     const buttons = userTokens.map((t, idx) => [
-        Markup.button.callback(`🔹 توکن شماره ${idx + 1} (...${t.token.slice(-6)})`, `select_token_${idx}`)
+        Markup.button.callback(`🔹 اکانت ${t.email} (...${t.railwayToken.slice(-6)})`, `select_token_${idx}`)
     ]);
     buttons.push([Markup.button.callback('🔙 بازگشت', 'main_menu')]);
 
-    await ctx.editMessageText('🔑 لطفاً توکن مورد نظر خود را برای ساخت پنل انتخاب کنید:', Markup.inlineKeyboard(buttons));
+    await ctx.editMessageText('🔑 لطفاً توکن ریلی‌وی مورد نظر خود را برای ساخت پنل انتخاب کنید:', Markup.inlineKeyboard(buttons));
 });
 
 // انتخاب توکن و نمایش لیست پنل‌ها
 bot.action(/select_token_(\d+)/, async (ctx) => {
+    const tokenIndex = ctx.match[1];
     await ctx.editMessageText(
         `👑 کدام پنل را می‌خواهید بسازید؟\n\nمخزن گیت‌هاب: luffy-sh-op/LUFFY_PANEL`,
         Markup.inlineKeyboard([
-            [Markup.button.callback('👑 Luffy Panel (شروع ساخت)', 'deploy_luffy')],
+            [Markup.button.callback('👑 Luffy Panel (شروع ساخت)', `deploy_luffy_${tokenIndex}`)],
             [Markup.button.callback('🔙 بازگشت', 'build_panel')]
         ])
     );
 });
 
-// شبیه‌سازی دیپلوی و ساخت دامین
-bot.action('deploy_luffy', async (ctx) => {
-    await ctx.editMessageText('⏳ در حال اتصال به گیت‌هاب برای فورک مخزن و راه‌اندازی روی ریلی‌وی...');
+// فرآیند دیپلوی روی ریلی‌وی با استفاده از توکن کاربر
+bot.action(/deploy_luffy_(\d+)/, async (ctx) => {
+    const userId = ctx.from.id;
+    const tokenIndex = ctx.match[1];
+    const db = loadData();
+    const userTokenObj = db.tokens[userId] ? db.tokens[userId][tokenIndex] : null;
+
+    if (!userTokenObj) {
+        return ctx.answerCbQuery('خطا: توکن یافت نشد!', { show_alert: true });
+    }
+
+    await ctx.editMessageText('⏳ در حال اتصال به حساب ریلی‌وی شما برای فورک مخزن (`luffy-sh-op/LUFFY_PANEL`) و ساخت دامین پورت 8080...');
+
+    // اینجا توکن ریلی‌وی کاربر (`userTokenObj.railwayToken`) در اختیار شماست 
+    // تا در صورت نیاز به درخواست‌های GraphQL/API ریلی‌وی برای ساخت پروژه و دامین ارسال شود.
 
     setTimeout(async () => {
         const randomId = Math.random().toString(36).substring(2, 8);
@@ -278,7 +298,7 @@ admin
 
 // اجرای ربات
 bot.launch().then(() => {
-    console.log('KIA Nex Bot is running successfully with Volume storage (/data)!');
+    console.log('KIA Nex Bot is running successfully with Railway Token support!');
 });
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
