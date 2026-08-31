@@ -59,12 +59,13 @@ async function railwayRequest(token, query, variables = {}) {
     return response.data?.data;
 }
 
-async function validateRailwayToken(token) {
+// تابع خودکار برای کشف و استخراج workspaceId بدون نیاز به انتخاب کاربر
+async function validateAndFetchWorkspace(token) {
     try {
         let email = 'user@railway.app';
         let workspaceId = null;
 
-        // تلاش اول: دریافت از طریق me و workspaces
+        // روش اول: بررسی از طریق me
         try {
             const meData = await railwayRequest(token, `
                 query {
@@ -83,7 +84,7 @@ async function validateRailwayToken(token) {
             }
         } catch (_) {}
 
-        // تلاش دوم: اگر ورک‌اسپیس پیدا نشد، مستقیم لیست ورک‌اسپیس‌ها را می‌گیریم
+        // روش دوم: بررسی مستقیم لیست ورک‌اسپیس‌ها اگر مورد اول خالی بود
         if (!workspaceId) {
             try {
                 const wsData = await railwayRequest(token, `
@@ -98,27 +99,39 @@ async function validateRailwayToken(token) {
             } catch (_) {}
         }
 
+        // روش سوم (فال‌بک نهایی): اگر هیچ تیمی نبود، تلاش برای گرفتن پروژه‌ها جهت تایید اتصال توکن
         if (!workspaceId) {
-            return { 
-                valid: false, 
-                error: 'برای این توکن هیچ Workspace ID معتبری پیدا نشد. لطفاً از پنل ریلی‌وی یک توکن با دسترسی Workspace بسازید.' 
-            };
+            try {
+                const projData = await railwayRequest(token, `
+                    query {
+                        projects { edges { node { id name } } }
+                    }
+                `);
+                if (projData) {
+                    workspaceId = 'PERSONAL_ACCOUNT'; // نشانگر حساب شخصی بدون تیم اجباری
+                }
+            } catch (_) {}
+        }
+
+        if (!workspaceId) {
+            return { valid: false, error: 'توکن نامعتبر است یا به هیچ حساب/ورک‌اسپیسی دسترسی ندارد.' };
         }
 
         return {
             valid: true,
             email: email,
-            workspaceId: workspaceId
+            workspaceId: workspaceId === 'PERSONAL_ACCOUNT' ? null : workspaceId
         };
 
     } catch (e) {
         return {
             valid: false,
-            error: e.message || 'توکن Railway نامعتبر است یا دسترسی کافی ندارد.'
+            error: e.message || 'خطا در اعتبارسنجی توکن ریلی‌وی.'
         };
     }
 }
 
+// تابع دیپلوی کاملاً اتوماتیک و هوشمند
 async function deployLuffyPanelToRailway(userTokenObj, ctx) {
     const token = userTokenObj.railwayToken;
     const headers = {
@@ -127,14 +140,17 @@ async function deployLuffyPanelToRailway(userTokenObj, ctx) {
     };
 
     try {
-        if (!userTokenObj.workspaceId) {
-            throw new Error('Workspace ID برای این توکن ثبت نشده است. لطفاً توکن را حذف و مجدداً ثبت کنید.');
-        }
-
-        // گام ۱: ساخت پروژه با ارسال دقیق teamId (workspaceId)
-        await ctx.editMessageText('⏳ قدم ۱/۴: در حال ساخت پروژه جدید در حساب ریلی‌وی شما...');
+        // گام ۱: ساخت پروژه به صورت خودکار
+        await ctx.editMessageText('⏳ قدم ۱/۴: در حال ساخت خودکار پروژه در حساب ریلی‌وی شما...');
 
         const projectName = `KIA-Nex-Panel-${Date.now()}`;
+        const projectInput = { name: projectName };
+        
+        // اگر ورک‌اسپیس شناسایی شده باشد، تیم‌اید اعمال می‌شود، وگرنه روی حساب شخصی ساخته می‌شود
+        if (userTokenObj.workspaceId) {
+            projectInput.teamId = userTokenObj.workspaceId;
+        }
+
         const createProjectRes = await axios.post(
             'https://backboard.railway.com/graphql/v2',
             {
@@ -151,12 +167,7 @@ async function deployLuffyPanelToRailway(userTokenObj, ctx) {
                         }
                     }
                 `,
-                variables: {
-                    input: {
-                        name: projectName,
-                        teamId: userTokenObj.workspaceId
-                    }
-                }
+                variables: { input: projectInput }
             },
             { headers, timeout: 60000 }
         );
@@ -171,8 +182,8 @@ async function deployLuffyPanelToRailway(userTokenObj, ctx) {
             throw new Error('Railway پروژه را ساخت اما شناسه پروژه دریافت نشد.');
         }
 
-        // گام ۲: پیدا کردن Environment پیش‌فرض
-        await ctx.editMessageText('⏳ قدم ۲/۴: در حال آماده‌سازی Environment پروژه...');
+        // گام ۲: دریافت Environment پیش‌فرض
+        await ctx.editMessageText('⏳ قدم ۲/۴: در حال آماده‌سازی محیط اجرایی (Environment)...');
 
         let environmentId = project?.environments?.edges?.[0]?.node?.id || null;
 
@@ -191,11 +202,11 @@ async function deployLuffyPanelToRailway(userTokenObj, ctx) {
         }
 
         if (!environmentId) {
-            throw new Error('Environment پیش‌فرض Railway پیدا نشد.');
+            throw new Error('محیط پیش‌فرض Railway پیدا نشد.');
         }
 
-        // گام ۳: ساخت سرویس از GitHub
-        await ctx.editMessageText('⏳ قدم ۳/۴: در حال اتصال مخزن GitHub (LUFFY_PANEL)...');
+        // گام ۳: اتصال خودکار مخزن گیت‌هاب لوفی پنل
+        await ctx.editMessageText('⏳ قدم ۳/۴: در حال اتصال مخزن لوفی پنل (luffy-sh-op/LUFFY_PANEL)...');
 
         const serviceRes = await railwayRequest(token, `
             mutation serviceCreate($input: ServiceCreateInput!) {
@@ -215,8 +226,8 @@ async function deployLuffyPanelToRailway(userTokenObj, ctx) {
             throw new Error('سرویس ساخته نشد یا Service ID دریافت نشد.');
         }
 
-        // گام ۴: تنظیم PORT و ساخت دامنه Railway
-        await ctx.editMessageText('⏳ قدم ۴/۴: تنظیم پورت 8080 و ساخت لینک نهایی...');
+        // گام ۴: تنظیم پورت 8080 و ساخت دامنه اختصاصی
+        await ctx.editMessageText('⏳ قدم ۴/۴: تنظیم پورت 8080 و ساخت دامنه اختصاصی...');
 
         try {
             await railwayRequest(token, `
@@ -250,14 +261,14 @@ async function deployLuffyPanelToRailway(userTokenObj, ctx) {
         }
 
         if (!domain) {
-            throw new Error('سرویس ساخته شد، اما Railway نتوانست Domain بسازد.');
+            throw new Error('سرویس ساخته شد، اما Railway نتوانست دامنه بسازد.');
         }
 
         const panelLink = `https://${domain}/dashboard`;
 
         const successText = `🎉 پنل با موفقیت ساخته شد!
 
-🚀 پنل شما آماده استفاده است.
+🚀 لوفی پنل شما آماده استفاده است.
 
 🔗 لینک پنل:
 ${panelLink}
@@ -268,7 +279,7 @@ admin
 ━━━━━━━━━━━━━━
 ⚡️ 𝑲𝑰𝑨 𝑵𝒆𝒙
 💡 لطفاً رمز عبور خود را با دیگران به اشتراک نگذارید.
-✅ با استفاده از لینک بالا وارد پنل شوید و مدیریت خود را آغاز کنید.`;
+✅ با استفاده از لینک بالا وارد پنل شوید.`;
 
         await ctx.editMessageText(successText, Markup.inlineKeyboard([
             [Markup.button.callback('🏠 بازگشت به منوی اصلی', 'main_menu')]
@@ -284,7 +295,7 @@ admin
         console.error('Railway deployment error:', error.response?.data || error);
 
         await ctx.editMessageText(
-            `❌ خطا در ساخت پنل روی ریلی‌وی!\n\nجزئیات خطا: ${errorMsg}\n\n💡 مطمئن شوید توکن Railway دسترسی ساخت Project در Workspace را دارد.`,
+            `❌ خطا در ساخت پنل روی ریلی‌وی!\n\nجزئیات خطا: ${errorMsg}\n\n💡 لطفاً توکن معتبر ریلی‌وی ارسال کنید.`,
             Markup.inlineKeyboard([
                 [Markup.button.callback('🔙 بازگشت', 'build_panel')]
             ])
@@ -324,7 +335,7 @@ bot.action('manage_tokens', async (ctx) => {
     const userTokens = db.tokens[userId] || [];
 
     let tokensListText = userTokens.length > 0 
-        ? userTokens.map((t, index) => `${index + 1}️⃣ توکن ریلی‌وی: ...${t.railwayToken.slice(-8)} | ایمیل: ${t.email}`).join('\n')
+        ? userTokens.map((t, index) => `${index + 1}️⃣ توکن ریلی‌وی: ...${t.railwayToken.slice(-8)} | اکانت: ${t.email}`).join('\n')
         : '❌ هیچ توکن ریلی‌وی ثبت نشده است.';
 
     const text = `🔐 مدیریت توکن‌ها (Railway API Token)
@@ -332,7 +343,6 @@ bot.action('manage_tokens', async (ctx) => {
 
 ➕ برای افزودن توکن جدید، گزینه ثبت توکن را انتخاب کنید.
 🗑️ برای حذف توکن‌های قبلی، گزینه حذف توکن را بزنید.
-⚡️ مدیریت آسان و سریع توکن‌ها با 𝑲𝑰𝑨 𝑵𝒆𝒙
 
 📋 توکن‌های ثبت شده شما:
 ${tokensListText}`;
@@ -356,7 +366,7 @@ bot.action('add_token', async (ctx) => {
     saveData(db);
 
     await ctx.editMessageText(
-        `➕ لطفاً **توکن حساب ریلی‌وی (Railway API Token)** خود را ارسال کنید:\n\n(برای لغو روی بازگشت بزنید)`,
+        `➕ لطفاً **توکن حساب ریلی‌وی (Railway API Token)** خود را ارسال کنید:\n\n(ربات به صورت خودکار پروژه و دامین را می‌سازد)`,
         Markup.inlineKeyboard([
             [Markup.button.callback('🔙 بازگشت', 'manage_tokens')]
         ])
@@ -371,7 +381,7 @@ bot.action('delete_tokens', async (ctx) => {
 
     await ctx.answerCbQuery('تمام توکن‌های قبلی حذف شد!');
     return ctx.editMessageText(
-        `🗑️ تمام توکن‌های ریلی‌وی شما با موفقیت حذف شدند.\n\n🔐 مدیریت توکن‌ها`,
+        `🗑️ تمام توکن‌های ریلی‌وی شما با موفقیت حذف شدند.`,
         Markup.inlineKeyboard([
             [Markup.button.callback('➕ افزودن توکن جدید', 'add_token')],
             [Markup.button.callback('🔙 بازگشت', 'main_menu')]
@@ -397,7 +407,7 @@ bot.on('text', async (ctx) => {
             db.botStatus.reason = text;
             db.userStates[userId] = null;
             saveData(db);
-            return ctx.reply('✅ ربات با موفقیت خاموش شد و پیام قطع برای کاربران اعمال گردید.');
+            return ctx.reply('✅ ربات با موفقیت خاموش شد.');
         }
     }
 
@@ -405,9 +415,9 @@ bot.on('text', async (ctx) => {
         db.userStates[userId] = null;
         saveData(db);
 
-        const status = await validateRailwayToken(text);
+        const status = await validateAndFetchWorkspace(text);
         if (!status.valid) {
-            return ctx.reply(`❌ توکن ریلی‌وی قابل استفاده نیست!\n\n${status.error || 'لطفاً یک API Token معتبر ارسال کنید.'}`, 
+            return ctx.reply(`❌ توکن ریلی‌وی قابل استفاده نیست!\n\n${status.error}`, 
                 Markup.inlineKeyboard([[Markup.button.callback('🔙 بازگشت', 'manage_tokens')]])
             );
         }
@@ -420,9 +430,9 @@ bot.on('text', async (ctx) => {
         });
         saveData(db);
 
-        return ctx.reply(`✅ توکن ریلی‌وی با موفقیت تایید شد!\n📧 اکانت / ورک‌اسپیس متصل: ${status.email}`,
+        return ctx.reply(`✅ توکن ریلی‌وی با موفقیت تأیید شد و اطلاعات اکانت ذخیره گردید!`,
             Markup.inlineKeyboard([
-                [Markup.button.callback('🔐 مدیریت توکن‌ها', 'manage_tokens')],
+                [Markup.button.callback('🏗️ ساخت پنل', 'build_panel')],
                 [Markup.button.callback('🏠 بازگشت به منوی اصلی', 'main_menu')]
             ])
         );
@@ -443,16 +453,16 @@ bot.action('admin_on', async (ctx) => {
     db.botStatus.active = true;
     db.botStatus.reason = '';
     saveData(db);
-    await ctx.reply('🟢 پنل با موفقیت فعال شد و به حالت عادی برگشت.');
+    await ctx.reply('🟢 پنل با موفقیت فعال شد.');
 });
 
 bot.action('build_panel', async (ctx) => {
     const userId = ctx.from.id;
     const db = loadData();
-    const userTokens = db.tokens[userId] /[] || db.tokens[userId] || [];
+    const userTokens = db.tokens[userId] || [];
 
     if (userTokens.length === 0) {
-        return ctx.answerCbQuery('لطفا ابتدا از گزینه مدیریت توکن، توکن ریلی‌وی ثبت کنید!', { show_alert: true });
+        return ctx.answerCbQuery('لطفا ابتدا از بخش مدیریت توکن، توکن ریلی‌وی ثبت کنید!', { show_alert: true });
     }
 
     const buttons = userTokens.map((t, idx) => [
@@ -460,23 +470,12 @@ bot.action('build_panel', async (ctx) => {
     ]);
     buttons.push([Markup.button.callback('🔙 بازگشت', 'main_menu')]);
 
-    await ctx.editMessageText('🔑 لطفاً توکن ریلی‌وی مورد نظر خود را برای ساخت پنل انتخاب کنید:', Markup.inlineKeyboard(buttons));
+    await ctx.editMessageText('🔑 لطفاً اکانت مدنظر خود را برای ساخت خودکار لوفی پنل انتخاب کنید:', Markup.inlineKeyboard(buttons));
 });
 
 bot.action(/select_token_(\d+)/, async (ctx) => {
     const tokenIndex = ctx.match[1];
-    await ctx.editMessageText(
-        `👑 کدام پنل را می‌خواهید بسازید؟\n\nمخزن گیت‌هاب: luffy-sh-op/LUFFY_PANEL`,
-        Markup.inlineKeyboard([
-            [Markup.button.callback('👑 Luffy Panel (شروع ساخت)', `deploy_luffy_${tokenIndex}`)],
-            [Markup.button.callback('🔙 بازگشت', 'build_panel')]
-        ])
-    );
-});
-
-bot.action(/deploy_luffy_(\d+)/, async (ctx) => {
     const userId = ctx.from.id;
-    const tokenIndex = ctx.match[1];
     const db = loadData();
     const userTokenObj = db.tokens[userId] ? db.tokens[userId][tokenIndex] : null;
 
