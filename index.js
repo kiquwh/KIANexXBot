@@ -39,7 +39,6 @@ function saveData(data) {
     fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
 }
 
-// تابع ارسال درخواست به گراف‌کیوال ریلی‌وی
 async function railwayRequest(token, query, variables = {}) {
     const response = await axios.post(
         'https://backboard.railway.com/graphql/v2',
@@ -60,13 +59,11 @@ async function railwayRequest(token, query, variables = {}) {
     return response.data?.data;
 }
 
-// معتبرسازی کامل توکن و استخراج Workspace ID و ایمیل
 async function validateRailwayToken(token) {
     try {
         let email = 'user@railway.app';
-        let workspaces = [];
+        let workspaceId = null;
 
-        // تلاش برای دریافت اطلاعات اکانت و ورک‌اسپیس‌ها
         try {
             const meData = await railwayRequest(token, `
                 query {
@@ -79,38 +76,30 @@ async function validateRailwayToken(token) {
             `);
             if (meData?.me) {
                 email = meData.me.email || email;
-                workspaces = meData.me.workspaces || [];
+                if (meData.me.workspaces && meData.me.workspaces.length > 0) {
+                    workspaceId = meData.me.workspaces[0].id;
+                }
             }
-        } catch (_) {
-            // اگر کوئری me خطا داد، مستقیماً سراغ کوئری workspaces می‌رویم
-        }
+        } catch (_) {}
 
-        // اگر از طریق me ورک‌اسپیس پیدا نشد، مستقیم بررسی می‌کنیم
-        if (workspaces.length === 0) {
+        if (!workspaceId) {
             try {
                 const wsData = await railwayRequest(token, `
                     query {
                         workspaces { id name }
                     }
                 `);
-                workspaces = wsData?.workspaces || [];
-                if (workspaces.length > 0) {
+                if (wsData?.workspaces && wsData.workspaces.length > 0) {
+                    workspaceId = wsData.workspaces[0].id;
                     email = 'Railway Workspace';
                 }
-            } catch (err) {
-                return { valid: false, error: 'خطا در ارتباط با ریلی‌وی: ' + err.message };
-            }
-        }
-
-        if (workspaces.length === 0) {
-            return { valid: false, error: 'هیچ Workspace قابل دسترسی برای این توکن پیدا نشد. مطمئن شوید توکن Account API معتبر است.' };
+            } catch (_) {}
         }
 
         return {
             valid: true,
             email: email,
-            workspaceId: workspaces[0].id,
-            workspaceName: workspaces[0].name
+            workspaceId: workspaceId // حتی اگر null هم باشد، در ساخت پروژه به صورت هوشمند مدیریت می‌شود
         };
 
     } catch (e) {
@@ -121,7 +110,6 @@ async function validateRailwayToken(token) {
     }
 }
 
-// تابع دیپلوی و ساخت قدم‌به‌قدم روی ریلی‌وی
 async function deployLuffyPanelToRailway(userTokenObj, ctx) {
     const token = userTokenObj.railwayToken;
     const headers = {
@@ -130,14 +118,17 @@ async function deployLuffyPanelToRailway(userTokenObj, ctx) {
     };
 
     try {
-        if (!userTokenObj.workspaceId) {
-            throw new Error('برای این توکن هیچ Workspace ID ثبت نشده است. لطفاً توکن را حذف کرده و مجدداً ثبت کنید.');
-        }
-
-        // گام ۱: ساخت پروژه در Workspace
+        // گام ۱: ساخت پروژه در ریلی‌وی (پشتیبانی هوشمند از داشتن یا نداشتن workspaceId)
         await ctx.editMessageText('⏳ قدم ۱/۴: در حال ساخت پروژه جدید در حساب ریلی‌وی شما...');
 
         const projectName = `KIA-Nex-Panel-${Date.now()}`;
+        const projectInput = { name: projectName };
+        
+        // اگر ورک‌اسپیس معتبری وجود داشت، teamId را اضافه می‌کنیم، در غیر این صورت حذف می‌شود تا روی اکانت شخصی ساخته شود
+        if (userTokenObj.workspaceId) {
+            projectInput.teamId = userTokenObj.workspaceId;
+        }
+
         const createProjectRes = await axios.post(
             'https://backboard.railway.com/graphql/v2',
             {
@@ -154,12 +145,7 @@ async function deployLuffyPanelToRailway(userTokenObj, ctx) {
                         }
                     }
                 `,
-                variables: {
-                    input: {
-                        name: projectName,
-                        teamId: userTokenObj.workspaceId
-                    }
-                }
+                variables: { input: projectInput }
             },
             { headers, timeout: 60000 }
         );
@@ -180,113 +166,74 @@ async function deployLuffyPanelToRailway(userTokenObj, ctx) {
         let environmentId = project?.environments?.edges?.[0]?.node?.id || null;
 
         if (!environmentId) {
-            const envRes = await axios.post(
-                'https://backboard.railway.com/graphql/v2',
-                {
-                    query: `
-                        query project($id: String!) {
-                            project(id: $id) {
-                                environments {
-                                    edges { node { id name } }
-                                }
-                            }
+            const envRes = await railwayRequest(token, `
+                query project($id: String!) {
+                    project(id: $id) {
+                        environments {
+                            edges { node { id name } }
                         }
-                    `,
-                    variables: { id: projectId }
-                },
-                { headers, timeout: 30000 }
-            );
+                    }
+                }
+            `, { id: projectId });
 
-            if (envRes.data?.errors?.length) {
-                throw new Error(envRes.data.errors.map(e => e.message).join(' | '));
-            }
-
-            environmentId = envRes.data?.data?.project?.environments?.edges?.[0]?.node?.id || null;
+            environmentId = envRes?.project?.environments?.edges?.[0]?.node?.id || null;
         }
 
         if (!environmentId) {
             throw new Error('Environment پیش‌فرض Railway پیدا نشد.');
         }
 
-        // گام ۳: ساخت سرویس از GitHub (مخزن لوفی پنل)
+        // گام ۳: ساخت سرویس از GitHub
         await ctx.editMessageText('⏳ قدم ۳/۴: در حال اتصال مخزن GitHub (LUFFY_PANEL)...');
 
-        const serviceRes = await axios.post(
-            'https://backboard.railway.com/graphql/v2',
-            {
-                query: `
-                    mutation serviceCreate($input: ServiceCreateInput!) {
-                        serviceCreate(input: $input) { id name }
-                    }
-                `,
-                variables: {
-                    input: {
-                        projectId,
-                        environmentId,
-                        name: 'luffy-panel',
-                        source: { repo: 'luffy-sh-op/LUFFY_PANEL' }
-                    }
-                }
-            },
-            { headers, timeout: 60000 }
-        );
+        const serviceRes = await railwayRequest(token, `
+            mutation serviceCreate($input: ServiceCreateInput!) {
+                serviceCreate(input: $input) { id name }
+            }
+        `, {
+            input: {
+                projectId,
+                environmentId,
+                name: 'luffy-panel',
+                source: { repo: 'luffy-sh-op/LUFFY_PANEL' }
+            }
+        });
 
-        if (serviceRes.data?.errors?.length) {
-            throw new Error(serviceRes.data.errors.map(e => e.message).join(' | '));
-        }
-
-        const serviceId = serviceRes.data?.data?.serviceCreate?.id;
+        const serviceId = serviceRes?.serviceCreate?.id;
         if (!serviceId) {
             throw new Error('سرویس ساخته نشد یا Service ID دریافت نشد.');
         }
 
-        // گام ۴: تنظیم پورت 8080 و ساخت دامنه اختصاصی Railway
+        // گام ۴: تنظیم PORT و ساخت دامنه Railway
         await ctx.editMessageText('⏳ قدم ۴/۴: تنظیم پورت 8080 و ساخت لینک نهایی...');
 
         try {
-            await axios.post(
-                'https://backboard.railway.com/graphql/v2',
-                {
-                    query: `
-                        mutation variableCollectionUpsert($input: VariableCollectionUpsertInput!) {
-                            variableCollectionUpsert(input: $input)
-                        }
-                    `,
-                    variables: {
-                        input: {
-                            projectId,
-                            environmentId,
-                            serviceId,
-                            variables: { PORT: '8080' }
-                        }
-                    }
-                },
-                { headers, timeout: 30000 }
-            );
+            await railwayRequest(token, `
+                mutation variableCollectionUpsert($input: VariableCollectionUpsertInput!) {
+                    variableCollectionUpsert(input: $input)
+                }
+            `, {
+                input: {
+                    projectId,
+                    environmentId,
+                    serviceId,
+                    variables: { PORT: '8080' }
+                }
+            });
         } catch (err) {
             console.log('PORT variable warning:', err.message);
         }
 
         let domain = null;
         try {
-            const domainRes = await axios.post(
-                'https://backboard.railway.com/graphql/v2',
-                {
-                    query: `
-                        mutation serviceDomainCreate($input: ServiceDomainCreateInput!) {
-                            serviceDomainCreate(input: $input) { domain }
-                        }
-                    `,
-                    variables: {
-                        input: { serviceId, environmentId }
-                    }
-                },
-                { headers, timeout: 30000 }
-            );
-
-            if (!domainRes.data?.errors?.length) {
-                domain = domainRes.data?.data?.serviceDomainCreate?.domain || null;
-            }
+            const domainRes = await railwayRequest(token, `
+                mutation serviceDomainCreate($input: ServiceDomainCreateInput!) {
+                    serviceDomainCreate(input: $input) { domain }
+                }
+            `, {
+                input: { serviceId, environmentId }
+            });
+            domain = domainRes?.serviceDomainCreate?.domain || null;
         } catch (err) {
             console.log('Domain warning:', err.message);
         }
@@ -301,7 +248,7 @@ async function deployLuffyPanelToRailway(userTokenObj, ctx) {
 
 🚀 پنل شما آماده استفاده است.
 
-🔗 لینک پنل (پورت 8080):
+🔗 لینک پنل:
 ${panelLink}
 
 🔐 رمز عبور پنل:
@@ -326,7 +273,7 @@ admin
         console.error('Railway deployment error:', error.response?.data || error);
 
         await ctx.editMessageText(
-            `❌ خطا در ساخت پنل روی ریلی‌وی!\n\nجزئیات خطا: ${errorMsg}\n\n💡 مطمئن شوید توکن Railway دسترسی ساخت Project در Workspace را دارد.`,
+            `❌ خطا در ساخت پنل روی ریلی‌وی!\n\nجزئیات خطا: ${errorMsg}\n\n💡 مطمئن شوید توکن Railway دسترسی ساخت Project را دارد.`,
             Markup.inlineKeyboard([
                 [Markup.button.callback('🔙 بازگشت', 'build_panel')]
             ])
@@ -449,7 +396,7 @@ bot.on('text', async (ctx) => {
 
         const status = await validateRailwayToken(text);
         if (!status.valid) {
-            return ctx.reply(`❌ توکن ریلی‌وی قابل استفاده نیست!\n\n${status.error || 'لطفاً یک API Token معتبر با دسترسی Workspace ارسال کنید.'}`, 
+            return ctx.reply(`❌ توکن ریلی‌وی قابل استفاده نیست!\n\n${status.error || 'لطفاً یک API Token معتبر ارسال کنید.'}`, 
                 Markup.inlineKeyboard([[Markup.button.callback('🔙 بازگشت', 'manage_tokens')]])
             );
         }
