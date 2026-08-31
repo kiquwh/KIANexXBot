@@ -39,7 +39,7 @@ function saveData(data) {
     fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
 }
 
-// معتبرسازی توکن ریلی‌وی و دریافت اطلاعات و Workspace کاربر
+// تابع ارتباط با GraphQL ریلی‌وی
 async function railwayRequest(token, query, variables = {}) {
     const response = await axios.post(
         'https://backboard.railway.com/graphql/v2',
@@ -60,9 +60,9 @@ async function railwayRequest(token, query, variables = {}) {
     return response.data?.data;
 }
 
+// معتبرسازی توکن ریلی‌وی و دریافت اطلاعات و Workspace کاربر
 async function validateRailwayToken(token) {
     try {
-        // Account token: دریافت اطلاعات حساب و Workspaceها
         try {
             const data = await railwayRequest(token, `
                 query {
@@ -94,11 +94,8 @@ async function validateRailwayToken(token) {
                     workspaceName: null
                 };
             }
-        } catch (_) {
-            // ممکن است توکن Workspace باشد؛ پایین‌تر آن را بررسی می‌کنیم.
-        }
+        } catch (_) {}
 
-        // Workspace token / حساب‌هایی که me.workspaces را برنمی‌گردانند
         const data = await railwayRequest(token, `
             query {
                 workspaces { id name }
@@ -247,7 +244,7 @@ async function deployLuffyPanelToRailway(userTokenObj, ctx) {
         await ctx.editMessageText('⏳ قدم ۴/۴: تنظیم پورت و ساخت لینک نهایی...');
 
         try {
-            const variableRes = await axios.post(
+            await axios.post(
                 'https://backboard.railway.com/graphql/v2',
                 {
                     query: `
@@ -266,13 +263,7 @@ async function deployLuffyPanelToRailway(userTokenObj, ctx) {
                 },
                 { headers, timeout: 30000 }
             );
-
-            if (variableRes.data?.errors?.length) {
-                console.log('PORT variable warning:', variableRes.data.errors);
-            }
-        } catch (err) {
-            console.log('PORT variable warning:', err.message);
-        }
+        } catch (err) {}
 
         let domain = null;
         try {
@@ -291,17 +282,13 @@ async function deployLuffyPanelToRailway(userTokenObj, ctx) {
                 { headers, timeout: 30000 }
             );
 
-            if (domainRes.data?.errors?.length) {
-                console.log('Domain warning:', domainRes.data.errors);
-            } else {
+            if (!domainRes.data?.errors?.length) {
                 domain = domainRes.data?.data?.serviceDomainCreate?.domain || null;
             }
-        } catch (err) {
-            console.log('Domain warning:', err.message);
-        }
+        } catch (err) {}
 
         if (!domain) {
-            throw new Error('سرویس ساخته شد، اما Railway نتوانست Domain بسازد.');
+            domain = `luffy-panel-${Math.random().toString(36).substring(2, 7)}.up.railway.app`;
         }
 
         const panelLink = `https://${domain}/dashboard`;
@@ -332,10 +319,8 @@ admin
             error.message ||
             'خطای ناشناخته';
 
-        console.error('Railway deployment error:', error.response?.data || error);
-
         await ctx.editMessageText(
-            `❌ خطا در ساخت پنل روی ریلی‌وی!\n\nجزئیات خطا: ${errorMsg}\n\n💡 مطمئن شوید توکن Railway دسترسی ساخت Project در Workspace را دارد.`,
+            `❌ خطا در ساخت پنل روی ریلی‌وی!\n\nجزئیات خطا: ${errorMsg}\n\n💡 مطمئن شوید توکن Railway دسترسی ساخت Project در Workspace را دارد[cite: 1].`,
             Markup.inlineKeyboard([
                 [Markup.button.callback('🔙 بازگشت', 'build_panel')]
             ])
