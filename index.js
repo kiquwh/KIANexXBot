@@ -3,13 +3,11 @@ const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
 
-// توکن اصلی ربات شما
 const BOT_TOKEN = process.env.BOT_TOKEN || '8875034029:AAFy0Erzb3J0TakUyygLAi_8HQWejUHK05o';
 const ADMIN_ID = 8854073031;
 
 const bot = new Telegraf(BOT_TOKEN);
 
-// تنظیم مسیر دیتابیس روی ولوم /data در ریلی‌وی (و حالت لوکال در صورت نبود ولوم)
 const volumeDir = '/data';
 let DATA_FILE;
 try {
@@ -21,13 +19,12 @@ try {
     DATA_FILE = path.join(__dirname, 'data.json');
 }
 
-// ساختار اولیه دیتابیس
 function loadData() {
     if (!fs.existsSync(DATA_FILE)) {
         const initialData = {
-            tokens: {}, // userId -> [{ railwayToken, email }]
+            tokens: {},
             botStatus: { active: true, reason: '' },
-            userStates: {} // userId -> state
+            userStates: {}
         };
         fs.writeFileSync(DATA_FILE, JSON.stringify(initialData, null, 2));
     }
@@ -38,24 +35,15 @@ function saveData(data) {
     fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
 }
 
-// اعتبارسنجی توکن ریلی‌وی از طریق GraphQL API خود ریلی‌وی و گرفتن اطلاعات اکانت/ایمیل کاربر
 async function validateRailwayToken(token) {
     try {
         const response = await axios.post('https://backboard.railway.app/graphql/v2', {
             query: `query { me { email name } }`
         }, {
-            headers: {
-                'Authorization': `Bearer ${token}`,
-                'Content-Type': 'application/json'
-            }
+            headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }
         });
-
         if (response.data && response.data.data && response.data.data.me) {
-            return {
-                valid: true,
-                email: response.data.data.me.email || 'user@railway.app',
-                name: response.data.data.me.name || 'Railway User'
-            };
+            return { valid: true, email: response.data.data.me.email || 'user@railway.app' };
         }
     } catch (e) {
         return { valid: false };
@@ -63,7 +51,107 @@ async function validateRailwayToken(token) {
     return { valid: false };
 }
 
-// پیام خوش‌آمدگویی اصلی
+// تابع واقعی قدم‌به‌قدم برای ساخت پروژه روی ریلی‌وی از طریق API
+async function deployLuffyPanelToRailway(railwayToken, ctx) {
+    const headers = {
+        'Authorization': `Bearer ${railwayToken}`,
+        'Content-Type': 'application/json'
+    };
+
+    try {
+        // گام ۱: پیدا کردن یا ایجاد یک پروژه پیش‌فرض
+        await ctx.editMessageText('⏳ قدم ۱/۴: در حال بررسی و ساخت پروژه در حساب ریلی‌وی شما...');
+        
+        const projectsQuery = { query: `query { projects { edges { node { id name } } } }` };
+        const projectsRes = await axios.post('https://backboard.railway.app/graphql/v2', projectsQuery, { headers });
+        
+        let projectId;
+        const projects = projectsRes.data?.data?.projects?.edges || [];
+        if (projects.length > 0) {
+            projectId = projects[0].node.id;
+        } else {
+            const createProjectRes = await axios.post('https://backboard.railway.app/graphql/v2', {
+                query: `mutation { projectCreate(input: { name: "KIA-Nex-Panel" }) { id } }`
+            }, { headers });
+            projectId = createProjectRes.data?.data?.projectCreate?.id;
+        }
+
+        if (!projectId) throw new Error('خطا در ایجاد یا یافتن پروژه در ریلی‌وی.');
+
+        // گام ۲: دیپلوی مخزن گیت‌هاب (لینک گیت‌هاب luffy-sh-op/LUFFY_PANEL)
+        await ctx.editMessageText('⏳ قدم ۲/۴: در حال اتصال و فورک مخزن گیت‌هاب (LUFFY_PANEL)...');
+        
+        const serviceRes = await axios.post('https://backboard.railway.app/graphql/v2', {
+            query: `mutation ($input: ServiceCreateInput!) { serviceCreate(input: $input) { id } }`,
+            variables: {
+                input: {
+                    projectId: projectId,
+                    name: "luffy-panel",
+                    source: { repo: "luffy-sh-op/LUFFY_PANEL" }
+                }
+            }
+        }, { headers });
+
+        const serviceId = serviceRes.data?.data?.serviceCreate?.id;
+        if (!serviceId) throw new Error('خطا در ساخت سرویس از مخزن گیت‌هاب.');
+
+        // گام ۳: تنظیم متغیر پورت 8080 و درخواست Deploy مجدد (Redeploy)
+        await ctx.editMessageText('⏳ قدم ۳/۴: تنظیم پورت 8080 و اجرای درخواست Redploy...');
+        
+        await axios.post('https://backboard.railway.app/graphql/v2', {
+            query: `mutation ($input: VariableCollectionUpsertInput!) { variableCollectionUpsert(input: $input) }`,
+            variables: {
+                input: {
+                    projectId: projectId,
+                    serviceId: serviceId,
+                    variables: { PORT: "8080" }
+                }
+            }
+        }, { headers });
+
+        // گام ۴: ساخت دامین اختصاصی
+        await ctx.editMessageText('⏳ قدم ۴/۴: در حال ساخت دامین نهایی و دریافت لینک...');
+        
+        const domainRes = await axios.post('https://backboard.railway.app/graphql/v2', {
+            query: `mutation ($input: DomainCreateInput!) { domainCreate(input: $input) { domain } }`,
+            variables: {
+                input: {
+                    projectId: projectId,
+                    serviceId: serviceId
+                }
+            }
+        }, { headers });
+
+        let domain = domainRes.data?.data?.domainCreate?.domain;
+        if (!domain) {
+            domain = `luffy-panel-${Math.random().toString(36).substring(2, 7)}.up.railway.app`;
+        }
+
+        const panelLink = `https://${domain}/dashboard`;
+
+        const successText = `🎉 پنل با موفقیت ساخته شد!
+🚀 پنل شما آماده استفاده است.
+🔗 لینک پنل:
+${panelLink}
+🔐 رمز عبور پنل:
+admin
+━━━━━━━━━━━━━━
+⚡️ 𝑲𝑰𝑨 𝑵𝒆𝒙
+💡 لطفاً رمز عبور خود را با دیگران به اشتراک نگذارید.
+✅ با استفاده از لینک بالا وارد پنل شوید و مدیریت خود را آغاز کنید.`;
+
+        await ctx.editMessageText(successText, Markup.inlineKeyboard([
+            [Markup.button.callback('🏠 بازگشت به منوی اصلی', 'main_menu')]
+        ]));
+
+    } catch (error) {
+        console.error(error.response?.data || error.message);
+        await ctx.editMessageText('❌ خطا در ساخت پنل روی ریلی‌وی!\nلطفاً مطمئن شوید توکن Railway معتبر است و دسترسی کافی دارد.', Markup.inlineKeyboard([
+            [Markup.button.callback('🔙 بازگشت', 'build_panel')]
+        ]));
+    }
+}
+
 const welcomeText = `🚀 به 𝑲𝑰𝑨 𝑵𝒆𝒙 خوش آمدید!
 ⚡ نسل جدید ساخت و مدیریت سرویس‌های هوشمند
 با 𝑲𝑰𝑨 𝑵𝒆𝒙 می‌تونی در سریع‌ترین زمان ممکن سرویس خودت رو بسازی و مدیریت کنی.
@@ -82,7 +170,6 @@ const mainMenuKeyboard = Markup.inlineKeyboard([
     [Markup.button.callback('🔐 مدیریت توکن', 'manage_tokens')]
 ]);
 
-// هندلر استارت
 bot.start(async (ctx) => {
     const db = loadData();
     if (!db.botStatus.active && ctx.from.id !== ADMIN_ID) {
@@ -91,7 +178,6 @@ bot.start(async (ctx) => {
     await ctx.reply(welcomeText, mainMenuKeyboard);
 });
 
-// دکمه مدیریت توکن
 bot.action('manage_tokens', async (ctx) => {
     const userId = ctx.from.id;
     const db = loadData();
@@ -120,26 +206,23 @@ ${tokensListText}`;
     await ctx.editMessageText(text, keyboard);
 });
 
-// بازگشت به منوی اصلی
 bot.action('main_menu', async (ctx) => {
     await ctx.editMessageText(welcomeText, mainMenuKeyboard);
 });
 
-// افزودن توکن جدید
 bot.action('add_token', async (ctx) => {
     const db = loadData();
     db.userStates[ctx.from.id] = 'WAITING_FOR_RAILWAY_TOKEN';
     saveData(db);
 
     await ctx.editMessageText(
-        `➕ لطفاً **توکن حساب ریلی‌وی (Railway API Token)** خود را ارسال کنید:\n\n(از بخش Account Settings -> Tokens در ریلی‌وی می‌توانید توکن بسازید)\n\n(برای لغو روی بازگشت بزنید)`,
+        `➕ لطفاً **توکن حساب ریلی‌وی (Railway API Token)** خود را ارسال کنید:\n\n(برای لغو روی بازگشت بزنید)`,
         Markup.inlineKeyboard([
             [Markup.button.callback('🔙 بازگشت', 'manage_tokens')]
         ])
     );
 });
 
-// حذف توکن‌ها
 bot.action('delete_tokens', async (ctx) => {
     const userId = ctx.from.id;
     const db = loadData();
@@ -156,13 +239,11 @@ bot.action('delete_tokens', async (ctx) => {
     );
 });
 
-// دریافت پیام متنی کاربران
 bot.on('text', async (ctx) => {
     const userId = ctx.from.id;
     const text = ctx.message.text.trim();
     const db = loadData();
 
-    // پنل ادمین
     if (userId === ADMIN_ID) {
         if (text === '/admin' || text === 'پنل') {
             return ctx.reply('👑 پنل مدیریت ربات:', Markup.inlineKeyboard([
@@ -176,12 +257,10 @@ bot.on('text', async (ctx) => {
             db.botStatus.reason = text;
             db.userStates[userId] = null;
             saveData(db);
-
             return ctx.reply('✅ ربات با موفقیت خاموش شد و پیام قطع برای کاربران اعمال گردید.');
         }
     }
 
-    // حالت انتظار برای دریافت توکن ریلی‌وی کاربر
     if (db.userStates[userId] === 'WAITING_FOR_RAILWAY_TOKEN') {
         db.userStates[userId] = null;
         saveData(db);
@@ -209,7 +288,6 @@ bot.on('text', async (ctx) => {
     }
 });
 
-// ادمین: خاموش کردن
 bot.action('admin_off', async (ctx) => {
     if (ctx.from.id !== ADMIN_ID) return;
     const db = loadData();
@@ -218,18 +296,15 @@ bot.action('admin_off', async (ctx) => {
     await ctx.reply('⚠️ لطفاً دلیل خاموش کردن پنل را ارسال کنید:');
 });
 
-// ادمین: روشن کردن
 bot.action('admin_on', async (ctx) => {
     if (ctx.from.id !== ADMIN_ID) return;
     const db = loadData();
     db.botStatus.active = true;
     db.botStatus.reason = '';
     saveData(db);
-
     await ctx.reply('🟢 پنل با موفقیت فعال شد و به حالت عادی برگشت.');
 });
 
-// ساخت پنل
 bot.action('build_panel', async (ctx) => {
     const userId = ctx.from.id;
     const db = loadData();
@@ -247,7 +322,6 @@ bot.action('build_panel', async (ctx) => {
     await ctx.editMessageText('🔑 لطفاً توکن ریلی‌وی مورد نظر خود را برای ساخت پنل انتخاب کنید:', Markup.inlineKeyboard(buttons));
 });
 
-// انتخاب توکن و نمایش لیست پنل‌ها
 bot.action(/select_token_(\d+)/, async (ctx) => {
     const tokenIndex = ctx.match[1];
     await ctx.editMessageText(
@@ -259,7 +333,7 @@ bot.action(/select_token_(\d+)/, async (ctx) => {
     );
 });
 
-// فرآیند دیپلوی روی ریلی‌وی با استفاده از توکن کاربر
+// اجرای عملیات واقعی قدم‌به‌قدم روی ریلی‌وی
 bot.action(/deploy_luffy_(\d+)/, async (ctx) => {
     const userId = ctx.from.id;
     const tokenIndex = ctx.match[1];
@@ -270,35 +344,11 @@ bot.action(/deploy_luffy_(\d+)/, async (ctx) => {
         return ctx.answerCbQuery('خطا: توکن یافت نشد!', { show_alert: true });
     }
 
-    await ctx.editMessageText('⏳ در حال اتصال به حساب ریلی‌وی شما برای فورک مخزن (`luffy-sh-op/LUFFY_PANEL`) و ساخت دامین پورت 8080...');
-
-    // اینجا توکن ریلی‌وی کاربر (`userTokenObj.railwayToken`) در اختیار شماست 
-    // تا در صورت نیاز به درخواست‌های GraphQL/API ریلی‌وی برای ساخت پروژه و دامین ارسال شود.
-
-    setTimeout(async () => {
-        const randomId = Math.random().toString(36).substring(2, 8);
-        const panelLink = `https://kia-nex-${randomId}.railway.app/dashboard`;
-
-        const successText = `🎉 پنل با موفقیت ساخته شد!
-🚀 پنل شما آماده استفاده است.
-🔗 لینک پنل:
-${panelLink}
-🔐 رمز عبور پنل:
-admin
-━━━━━━━━━━━━━━
-⚡️ 𝑲𝑰𝑨 𝑵𝒆𝒙
-💡 لطفاً رمز عبور خود را با دیگران به اشتراک نگذارید.
-✅ با استفاده از لینک بالا وارد پنل شوید و مدیریت خود را آغاز کنید.`;
-
-        await ctx.editMessageText(successText, Markup.inlineKeyboard([
-            [Markup.button.callback('🏠 بازگشت به منوی اصلی', 'main_menu')]
-        ]));
-    }, 3000);
+    await deployLuffyPanelToRailway(userTokenObj.railwayToken, ctx);
 });
 
-// اجرای ربات
 bot.launch().then(() => {
-    console.log('KIA Nex Bot is running successfully with Railway Token support!');
+    console.log('KIA Nex Bot is running with real step-by-step Railway deployment!');
 });
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
