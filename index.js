@@ -39,7 +39,7 @@ function saveData(data) {
     fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
 }
 
-// تابع ارتباط با GraphQL ریلی‌وی
+// تابع ارسال درخواست به گراف‌کیوال ریلی‌وی
 async function railwayRequest(token, query, variables = {}) {
     const response = await axios.post(
         'https://backboard.railway.com/graphql/v2',
@@ -60,12 +60,15 @@ async function railwayRequest(token, query, variables = {}) {
     return response.data?.data;
 }
 
-// معتبرسازی توکن ریلی‌وی و پیدا کردن هوشمند Workspace ID
+// معتبرسازی کامل توکن و استخراج Workspace ID و ایمیل
 async function validateRailwayToken(token) {
     try {
-        // روش اول: گرفتن اطلاعات از طریق query سطح کاربر (me)
+        let email = 'user@railway.app';
+        let workspaces = [];
+
+        // تلاش برای دریافت اطلاعات اکانت و ورک‌اسپیس‌ها
         try {
-            const data = await railwayRequest(token, `
+            const meData = await railwayRequest(token, `
                 query {
                     me {
                         email
@@ -74,52 +77,51 @@ async function validateRailwayToken(token) {
                     }
                 }
             `);
-
-            const me = data?.me;
-            const workspaces = me?.workspaces || [];
-
-            if (me && workspaces.length > 0) {
-                return {
-                    valid: true,
-                    email: me.email || 'user@railway.app',
-                    workspaceId: workspaces[0].id,
-                    workspaceName: workspaces[0].name
-                };
+            if (meData?.me) {
+                email = meData.me.email || email;
+                workspaces = meData.me.workspaces || [];
             }
-        } catch (_) {}
+        } catch (_) {
+            // اگر کوئری me خطا داد، مستقیماً سراغ کوئری workspaces می‌رویم
+        }
 
-        // روش دوم: گرفتن مستقیم Workspaceها برای توکن‌های تیمی یا اکانت‌های خاص
-        try {
-            const data = await railwayRequest(token, `
-                query {
-                    workspaces { id name }
+        // اگر از طریق me ورک‌اسپیس پیدا نشد، مستقیم بررسی می‌کنیم
+        if (workspaces.length === 0) {
+            try {
+                const wsData = await railwayRequest(token, `
+                    query {
+                        workspaces { id name }
+                    }
+                `);
+                workspaces = wsData?.workspaces || [];
+                if (workspaces.length > 0) {
+                    email = 'Railway Workspace';
                 }
-            `);
-
-            const workspaces = data?.workspaces || [];
-            if (workspaces.length > 0) {
-                return {
-                    valid: true,
-                    email: 'Railway Workspace',
-                    workspaceId: workspaces[0].id,
-                    workspaceName: workspaces[0].name
-                };
+            } catch (err) {
+                return { valid: false, error: 'خطا در ارتباط با ریلی‌وی: ' + err.message };
             }
-        } catch (_) {}
+        }
 
-        return { 
-            valid: false, 
-            error: 'توکن معتبر است اما هیچ Workspace (تیم) فعالی برای آن یافت نشد. لطفاً از بخش Account Settings در ریلی‌وی یک توکن با دسترسی کامل بسازید.' 
+        if (workspaces.length === 0) {
+            return { valid: false, error: 'هیچ Workspace قابل دسترسی برای این توکن پیدا نشد. مطمئن شوید توکن Account API معتبر است.' };
+        }
+
+        return {
+            valid: true,
+            email: email,
+            workspaceId: workspaces[0].id,
+            workspaceName: workspaces[0].name
         };
+
     } catch (e) {
         return {
             valid: false,
-            error: e.message || 'توکن Railway نامعتبر است یا دسترسی کافی ندارد[cite: 1].'
+            error: e.message || 'توکن Railway نامعتبر است یا دسترسی کافی ندارد.'
         };
     }
 }
 
-// تابع ساخت پروژه روی ریلی‌وی
+// تابع دیپلوی و ساخت قدم‌به‌قدم روی ریلی‌وی
 async function deployLuffyPanelToRailway(userTokenObj, ctx) {
     const token = userTokenObj.railwayToken;
     const headers = {
@@ -129,10 +131,10 @@ async function deployLuffyPanelToRailway(userTokenObj, ctx) {
 
     try {
         if (!userTokenObj.workspaceId) {
-            throw new Error('برای این توکن هیچ Workspace ID پیدا نشد. لطفا توکنی با دسترسی به Workspace وارد کنید[cite: 1].');
+            throw new Error('برای این توکن هیچ Workspace ID ثبت نشده است. لطفاً توکن را حذف کرده و مجدداً ثبت کنید.');
         }
 
-        // گام ۱: ساخت پروژه با استفاده از teamId (همان Workspace ID)
+        // گام ۱: ساخت پروژه در Workspace
         await ctx.editMessageText('⏳ قدم ۱/۴: در حال ساخت پروژه جدید در حساب ریلی‌وی شما...');
 
         const projectName = `KIA-Nex-Panel-${Date.now()}`;
@@ -195,6 +197,10 @@ async function deployLuffyPanelToRailway(userTokenObj, ctx) {
                 { headers, timeout: 30000 }
             );
 
+            if (envRes.data?.errors?.length) {
+                throw new Error(envRes.data.errors.map(e => e.message).join(' | '));
+            }
+
             environmentId = envRes.data?.data?.project?.environments?.edges?.[0]?.node?.id || null;
         }
 
@@ -202,7 +208,7 @@ async function deployLuffyPanelToRailway(userTokenObj, ctx) {
             throw new Error('Environment پیش‌فرض Railway پیدا نشد.');
         }
 
-        // گام ۳: ساخت سرویس از مخزن گیت‌هاب
+        // گام ۳: ساخت سرویس از GitHub (مخزن لوفی پنل)
         await ctx.editMessageText('⏳ قدم ۳/۴: در حال اتصال مخزن GitHub (LUFFY_PANEL)...');
 
         const serviceRes = await axios.post(
@@ -234,8 +240,8 @@ async function deployLuffyPanelToRailway(userTokenObj, ctx) {
             throw new Error('سرویس ساخته نشد یا Service ID دریافت نشد.');
         }
 
-        // گام ۴: تنظیم PORT و ساخت دامنه اختصاصی
-        await ctx.editMessageText('⏳ قدم ۴/۴: تنظیم پورت و ساخت لینک نهایی...');
+        // گام ۴: تنظیم پورت 8080 و ساخت دامنه اختصاصی Railway
+        await ctx.editMessageText('⏳ قدم ۴/۴: تنظیم پورت 8080 و ساخت لینک نهایی...');
 
         try {
             await axios.post(
@@ -257,7 +263,9 @@ async function deployLuffyPanelToRailway(userTokenObj, ctx) {
                 },
                 { headers, timeout: 30000 }
             );
-        } catch (err) {}
+        } catch (err) {
+            console.log('PORT variable warning:', err.message);
+        }
 
         let domain = null;
         try {
@@ -279,10 +287,12 @@ async function deployLuffyPanelToRailway(userTokenObj, ctx) {
             if (!domainRes.data?.errors?.length) {
                 domain = domainRes.data?.data?.serviceDomainCreate?.domain || null;
             }
-        } catch (err) {}
+        } catch (err) {
+            console.log('Domain warning:', err.message);
+        }
 
         if (!domain) {
-            domain = `luffy-panel-${Math.random().toString(36).substring(2, 7)}.up.railway.app`;
+            throw new Error('سرویس ساخته شد، اما Railway نتوانست Domain بسازد.');
         }
 
         const panelLink = `https://${domain}/dashboard`;
@@ -291,7 +301,7 @@ async function deployLuffyPanelToRailway(userTokenObj, ctx) {
 
 🚀 پنل شما آماده استفاده است.
 
-🔗 لینک پنل:
+🔗 لینک پنل (پورت 8080):
 ${panelLink}
 
 🔐 رمز عبور پنل:
@@ -313,8 +323,10 @@ admin
             error.message ||
             'خطای ناشناخته';
 
+        console.error('Railway deployment error:', error.response?.data || error);
+
         await ctx.editMessageText(
-            `❌ خطا در ساخت پنل روی ریلی‌وی!\n\nجزئیات خطا: ${errorMsg}\n\n💡 مطمئن شوید توکن Railway دسترسی ساخت Project در Workspace را دارد[cite: 1].`,
+            `❌ خطا در ساخت پنل روی ریلی‌وی!\n\nجزئیات خطا: ${errorMsg}\n\n💡 مطمئن شوید توکن Railway دسترسی ساخت Project در Workspace را دارد.`,
             Markup.inlineKeyboard([
                 [Markup.button.callback('🔙 بازگشت', 'build_panel')]
             ])
@@ -450,7 +462,7 @@ bot.on('text', async (ctx) => {
         });
         saveData(db);
 
-        return ctx.reply(`✅ توکن ریلی‌وی با موفقیت تایید شد!\n📧 ایمیل اکانت متصل: ${status.email}\n🏢 شناسه وایس‌ورک: ${status.workspaceId || 'ناشناس'}`,
+        return ctx.reply(`✅ توکن ریلی‌وی با موفقیت تایید شد!\n📧 ایمیل اکانت متصل: ${status.email}`,
             Markup.inlineKeyboard([
                 [Markup.button.callback('🔐 مدیریت توکن‌ها', 'manage_tokens')],
                 [Markup.button.callback('🏠 بازگشت به منوی اصلی', 'main_menu')]
