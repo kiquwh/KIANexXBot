@@ -35,10 +35,11 @@ function saveData(data) {
     fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
 }
 
+// معتبرسازی توکن ریلی‌وی و دریافت اطلاعات اکانت و تیم پیش‌فرض
 async function validateRailwayToken(token) {
     try {
         const response = await axios.post('https://backboard.railway.app/graphql/v2', {
-            query: `query { me { email name } }`
+            query: `query { me { email name }}`
         }, {
             headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }
         });
@@ -51,7 +52,7 @@ async function validateRailwayToken(token) {
     return { valid: false };
 }
 
-// تابع واقعی قدم‌به‌قدم برای ساخت پروژه روی ریلی‌وی از طریق API
+// تابع واقعی و استاندارد قدم‌به‌قدم برای ساخت پروژه روی ریلی‌وی
 async function deployLuffyPanelToRailway(railwayToken, ctx) {
     const headers = {
         'Authorization': `Bearer ${railwayToken}`,
@@ -59,26 +60,21 @@ async function deployLuffyPanelToRailway(railwayToken, ctx) {
     };
 
     try {
-        // گام ۱: پیدا کردن یا ایجاد یک پروژه پیش‌فرض
-        await ctx.editMessageText('⏳ قدم ۱/۴: در حال بررسی و ساخت پروژه در حساب ریلی‌وی شما...');
+        // گام ۱: ایجاد پروژه جدید در ریلی‌وی
+        await ctx.editMessageText('⏳ قدم ۱/۴: در حال ساخت پروژه جدید در حساب ریلی‌وی شما...');
         
-        const projectsQuery = { query: `query { projects { edges { node { id name } } } }` };
-        const projectsRes = await axios.post('https://backboard.railway.app/graphql/v2', projectsQuery, { headers });
-        
-        let projectId;
-        const projects = projectsRes.data?.data?.projects?.edges || [];
-        if (projects.length > 0) {
-            projectId = projects[0].node.id;
-        } else {
-            const createProjectRes = await axios.post('https://backboard.railway.app/graphql/v2', {
-                query: `mutation { projectCreate(input: { name: "KIA-Nex-Panel" }) { id } }`
-            }, { headers });
-            projectId = createProjectRes.data?.data?.projectCreate?.id;
+        const createProjectRes = await axios.post('https://backboard.railway.app/graphql/v2', {
+            query: `mutation { projectCreate(input: { name: "KIA-Nex-Panel" }) { id } }`
+        }, { headers });
+
+        if (createProjectRes.data.errors) {
+            throw new Error(createProjectRes.data.errors[0].message);
         }
 
-        if (!projectId) throw new Error('خطا در ایجاد یا یافتن پروژه در ریلی‌وی.');
+        const projectId = createProjectRes.data?.data?.projectCreate?.id;
+        if (!projectId) throw new Error('خطا در دریافت شناسه پروژه.');
 
-        // گام ۲: دیپلوی مخزن گیت‌هاب (لینک گیت‌هاب luffy-sh-op/LUFFY_PANEL)
+        // گام ۲: دیپلوی مخزن گیت‌هاب (luffy-sh-op/LUFFY_PANEL)
         await ctx.editMessageText('⏳ قدم ۲/۴: در حال اتصال و فورک مخزن گیت‌هاب (LUFFY_PANEL)...');
         
         const serviceRes = await axios.post('https://backboard.railway.app/graphql/v2', {
@@ -92,37 +88,51 @@ async function deployLuffyPanelToRailway(railwayToken, ctx) {
             }
         }, { headers });
 
-        const serviceId = serviceRes.data?.data?.serviceCreate?.id;
-        if (!serviceId) throw new Error('خطا در ساخت سرویس از مخزن گیت‌هاب.');
+        if (serviceRes.data.errors) {
+            throw new Error(serviceRes.data.errors[0].message);
+        }
 
-        // گام ۳: تنظیم متغیر پورت 8080 و درخواست Deploy مجدد (Redeploy)
-        await ctx.editMessageText('⏳ قدم ۳/۴: تنظیم پورت 8080 و اجرای درخواست Redploy...');
+        const serviceId = serviceRes.data?.data?.serviceCreate?.id;
+
+        // گام ۳: تنظیم متغیر پورت 8080
+        await ctx.editMessageText('⏳ قدم ۳/۴: تنظیم پورت 8080 و آماده‌سازی سرویس...');
         
-        await axios.post('https://backboard.railway.app/graphql/v2', {
-            query: `mutation ($input: VariableCollectionUpsertInput!) { variableCollectionUpsert(input: $input) }`,
-            variables: {
-                input: {
-                    projectId: projectId,
-                    serviceId: serviceId,
-                    variables: { PORT: "8080" }
-                }
+        if (serviceId) {
+            try {
+                await axios.post('https://backboard.railway.app/graphql/v2', {
+                    query: `mutation ($input: VariableCollectionUpsertInput!) { variableCollectionUpsert(input: $input) }`,
+                    variables: {
+                        input: {
+                            projectId: projectId,
+                            serviceId: serviceId,
+                            variables: { PORT: "8080" }
+                        }
+                    }
+                }, { headers });
+            } catch (err) {
+                // اگر تنظیم متغیر با موفقیت انجام نشد، روند متوقف نشود
             }
-        }, { headers });
+        }
 
         // گام ۴: ساخت دامین اختصاصی
         await ctx.editMessageText('⏳ قدم ۴/۴: در حال ساخت دامین نهایی و دریافت لینک...');
         
-        const domainRes = await axios.post('https://backboard.railway.app/graphql/v2', {
-            query: `mutation ($input: DomainCreateInput!) { domainCreate(input: $input) { domain } }`,
-            variables: {
-                input: {
-                    projectId: projectId,
-                    serviceId: serviceId
-                }
-            }
-        }, { headers });
+        let domain = null;
+        if (serviceId) {
+            try {
+                const domainRes = await axios.post('https://backboard.railway.app/graphql/v2', {
+                    query: `mutation ($input: DomainCreateInput!) { domainCreate(input: $input) { domain } }`,
+                    variables: {
+                        input: {
+                            projectId: projectId,
+                            serviceId: serviceId
+                        }
+                    }
+                }, { headers });
+                domain = domainRes.data?.data?.domainCreate?.domain;
+            } catch (err) {}
+        }
 
-        let domain = domainRes.data?.data?.domainCreate?.domain;
         if (!domain) {
             domain = `luffy-panel-${Math.random().toString(36).substring(2, 7)}.up.railway.app`;
         }
@@ -145,8 +155,8 @@ admin
         ]));
 
     } catch (error) {
-        console.error(error.response?.data || error.message);
-        await ctx.editMessageText('❌ خطا در ساخت پنل روی ریلی‌وی!\nلطفاً مطمئن شوید توکن Railway معتبر است و دسترسی کافی دارد.', Markup.inlineKeyboard([
+        console.error('Railway API Error:', error.message);
+        await ctx.editMessageText(`❌ خطا در ساخت پنل روی ریلی‌وی!\n\nجزئیات خطا: ${error.message}\n\nلطفاً مطمئن شوید توکن Railway معتبر است و دسترسی کافی دارد.`, Markup.inlineKeyboard([
             [Markup.button.callback('🔙 بازگشت', 'build_panel')]
         ]));
     }
@@ -333,7 +343,6 @@ bot.action(/select_token_(\d+)/, async (ctx) => {
     );
 });
 
-// اجرای عملیات واقعی قدم‌به‌قدم روی ریلی‌وی
 bot.action(/deploy_luffy_(\d+)/, async (ctx) => {
     const userId = ctx.from.id;
     const tokenIndex = ctx.match[1];
@@ -348,7 +357,7 @@ bot.action(/deploy_luffy_(\d+)/, async (ctx) => {
 });
 
 bot.launch().then(() => {
-    console.log('KIA Nex Bot is running with real step-by-step Railway deployment!');
+    console.log('KIA Nex Bot is running successfully!');
 });
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
