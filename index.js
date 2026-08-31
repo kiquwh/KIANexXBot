@@ -64,6 +64,7 @@ async function validateRailwayToken(token) {
         let email = 'user@railway.app';
         let workspaceId = null;
 
+        // تلاش اول: دریافت از طریق me و workspaces
         try {
             const meData = await railwayRequest(token, `
                 query {
@@ -82,6 +83,7 @@ async function validateRailwayToken(token) {
             }
         } catch (_) {}
 
+        // تلاش دوم: اگر ورک‌اسپیس پیدا نشد، مستقیم لیست ورک‌اسپیس‌ها را می‌گیریم
         if (!workspaceId) {
             try {
                 const wsData = await railwayRequest(token, `
@@ -96,10 +98,17 @@ async function validateRailwayToken(token) {
             } catch (_) {}
         }
 
+        if (!workspaceId) {
+            return { 
+                valid: false, 
+                error: 'برای این توکن هیچ Workspace ID معتبری پیدا نشد. لطفاً از پنل ریلی‌وی یک توکن با دسترسی Workspace بسازید.' 
+            };
+        }
+
         return {
             valid: true,
             email: email,
-            workspaceId: workspaceId // حتی اگر null هم باشد، در ساخت پروژه به صورت هوشمند مدیریت می‌شود
+            workspaceId: workspaceId
         };
 
     } catch (e) {
@@ -118,17 +127,14 @@ async function deployLuffyPanelToRailway(userTokenObj, ctx) {
     };
 
     try {
-        // گام ۱: ساخت پروژه در ریلی‌وی (پشتیبانی هوشمند از داشتن یا نداشتن workspaceId)
+        if (!userTokenObj.workspaceId) {
+            throw new Error('Workspace ID برای این توکن ثبت نشده است. لطفاً توکن را حذف و مجدداً ثبت کنید.');
+        }
+
+        // گام ۱: ساخت پروژه با ارسال دقیق teamId (workspaceId)
         await ctx.editMessageText('⏳ قدم ۱/۴: در حال ساخت پروژه جدید در حساب ریلی‌وی شما...');
 
         const projectName = `KIA-Nex-Panel-${Date.now()}`;
-        const projectInput = { name: projectName };
-        
-        // اگر ورک‌اسپیس معتبری وجود داشت، teamId را اضافه می‌کنیم، در غیر این صورت حذف می‌شود تا روی اکانت شخصی ساخته شود
-        if (userTokenObj.workspaceId) {
-            projectInput.teamId = userTokenObj.workspaceId;
-        }
-
         const createProjectRes = await axios.post(
             'https://backboard.railway.com/graphql/v2',
             {
@@ -145,7 +151,12 @@ async function deployLuffyPanelToRailway(userTokenObj, ctx) {
                         }
                     }
                 `,
-                variables: { input: projectInput }
+                variables: {
+                    input: {
+                        name: projectName,
+                        teamId: userTokenObj.workspaceId
+                    }
+                }
             },
             { headers, timeout: 60000 }
         );
@@ -273,7 +284,7 @@ admin
         console.error('Railway deployment error:', error.response?.data || error);
 
         await ctx.editMessageText(
-            `❌ خطا در ساخت پنل روی ریلی‌وی!\n\nجزئیات خطا: ${errorMsg}\n\n💡 مطمئن شوید توکن Railway دسترسی ساخت Project را دارد.`,
+            `❌ خطا در ساخت پنل روی ریلی‌وی!\n\nجزئیات خطا: ${errorMsg}\n\n💡 مطمئن شوید توکن Railway دسترسی ساخت Project در Workspace را دارد.`,
             Markup.inlineKeyboard([
                 [Markup.button.callback('🔙 بازگشت', 'build_panel')]
             ])
@@ -409,7 +420,7 @@ bot.on('text', async (ctx) => {
         });
         saveData(db);
 
-        return ctx.reply(`✅ توکن ریلی‌وی با موفقیت تایید شد!\n📧 ایمیل اکانت متصل: ${status.email}`,
+        return ctx.reply(`✅ توکن ریلی‌وی با موفقیت تایید شد!\n📧 اکانت / ورک‌اسپیس متصل: ${status.email}`,
             Markup.inlineKeyboard([
                 [Markup.button.callback('🔐 مدیریت توکن‌ها', 'manage_tokens')],
                 [Markup.button.callback('🏠 بازگشت به منوی اصلی', 'main_menu')]
@@ -438,7 +449,7 @@ bot.action('admin_on', async (ctx) => {
 bot.action('build_panel', async (ctx) => {
     const userId = ctx.from.id;
     const db = loadData();
-    const userTokens = db.tokens[userId] || [];
+    const userTokens = db.tokens[userId] /[] || db.tokens[userId] || [];
 
     if (userTokens.length === 0) {
         return ctx.answerCbQuery('لطفا ابتدا از گزینه مدیریت توکن، توکن ریلی‌وی ثبت کنید!', { show_alert: true });
