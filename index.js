@@ -3,16 +3,26 @@ const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
 
-// توکن اصلی ربات شما (می‌توانید از متغیرهای محیطی Railway هم بخوانید)
-const BOT_TOKEN = process.env.BOT_TOKEN || 'YOUR_BOT_TOKEN_HERE';
+// توکن اصلی ربات شما
+const BOT_TOKEN = process.env.BOT_TOKEN || '8875034029:AAFy0Erzb3J0TakUyygLAi_8HQWejUHK05o';
 const ADMIN_ID = 8854073031;
 
 const bot = new Telegraf(BOT_TOKEN);
 
-// مسیر ذخیره‌سازی داده‌ها روی Volume ریلی‌وی
-const DATA_FILE = path.join(__dirname, 'data.json');
+// تنظیم مسیر دیتابیس روی ولوم /data در ریلی‌وی (و حالت لوکال در صورت نبود ولوم)
+const volumeDir = '/data';
+let DATA_FILE;
+try {
+    if (!fs.existsSync(volumeDir)) {
+        fs.mkdirSync(volumeDir, { recursive: true });
+    }
+    DATA_FILE = path.join(volumeDir, 'data.json');
+} catch (e) {
+    // اگر پوشه /data دردسترس نبود (مثل تست روی سیستم شخصی) از پوشه محلی استفاده می‌کند
+    DATA_FILE = path.join(__dirname, 'data.json');
+}
 
-// ساختار اولیه دیتابیس ساده روی فایل (برای Volume ریلی‌وی)
+// ساختار اولیه دیتابیس
 function loadData() {
     if (!fs.existsSync(DATA_FILE)) {
         const initialData = {
@@ -29,13 +39,11 @@ function saveData(data) {
     fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
 }
 
-// چک کردن معتبر بودن توکن ربات تلگرام و گرفتن ایمیل (از طریق متد getMe)
+// چک کردن معتبر بودن توکن ربات تلگرام
 async function validateTelegramToken(token) {
     try {
         const response = await axios.get(`https://api.telegram.org/bot${token}/getMe`);
         if (response.data && response.data.ok) {
-            // تلگرام مستقیماً ایمیل نمی‌دهد، اما اطلاعات بات را می‌دهد. 
-            // برای شبیه‌سازی یا دریافت ایمیل مرتبط، از ساختار بات استفاده می‌کنیم یا ایمیل پیشفرض امنیتی ثبت می‌کنیم
             return {
                 valid: true,
                 username: response.data.result.username,
@@ -110,7 +118,7 @@ bot.action('main_menu', async (ctx) => {
     await ctx.editMessageText(welcomeText, mainMenuKeyboard);
 });
 
-// افزودن توکن جدید (درخواست ارسال توکن)
+// افزودن توکن جدید
 bot.action('add_token', async (ctx) => {
     const db = loadData();
     db.userStates[ctx.from.id] = 'WAITING_FOR_TOKEN';
@@ -132,7 +140,6 @@ bot.action('delete_tokens', async (ctx) => {
     saveData(db);
 
     await ctx.answerCbQuery('تمام توکن‌های قبلی حذف شد!');
-    // رفرش صفحه مدیریت توکن
     return ctx.editMessageText(
         `🗑️ تمام توکن‌های شما با موفقیت حذف شدند.\n\n🔐 مدیریت توکن‌ها`,
         Markup.inlineKeyboard([
@@ -142,13 +149,13 @@ bot.action('delete_tokens', async (ctx) => {
     );
 });
 
-// دریافت پیام متنی کاربران (برای گرفتن توکن یا دلیل خاموشی ادمین)
+// دریافت پیام متنی کاربران
 bot.on('text', async (ctx) => {
     const userId = ctx.from.id;
     const text = ctx.message.text;
     const db = loadData();
 
-    // پنل ادمین و دستورات مدیریت
+    // پنل ادمین
     if (userId === ADMIN_ID) {
         if (text === '/admin' || text === 'پنل') {
             return ctx.reply('👑 پنل مدیریت ربات:', Markup.inlineKeyboard([
@@ -163,11 +170,7 @@ bot.on('text', async (ctx) => {
             db.userStates[userId] = null;
             saveData(db);
 
-            // ارسال پیام به همه کاربران (یا اطلاع‌رسانی)
-            await ctx.reply('✅ ربات با موفقیت خاموش شد و پیام قطع برای کاربران اعمال گردید.');
-            
-            // در اینجا می‌توانید به کاربران ثبت شده در دیتابیس پیام هم ارسال کنید
-            return;
+            return ctx.reply('✅ ربات با موفقیت خاموش شد و پیام قطع برای کاربران اعمال گردید.');
         }
     }
 
@@ -183,7 +186,6 @@ bot.on('text', async (ctx) => {
             );
         }
 
-        // ذخیره توکن
         if (!db.tokens[userId]) db.tokens[userId] = [];
         db.tokens[userId].push({
             token: text.trim(),
@@ -200,7 +202,7 @@ bot.on('text', async (ctx) => {
     }
 });
 
-// مدیریت بخش ادمین: خاموش کردن
+// ادمین: خاموش کردن
 bot.action('admin_off', async (ctx) => {
     if (ctx.from.id !== ADMIN_ID) return;
     const db = loadData();
@@ -209,7 +211,7 @@ bot.action('admin_off', async (ctx) => {
     await ctx.reply('⚠️ لطفاً دلیل خاموش کردن پنل را ارسال کنید:');
 });
 
-// مدیریت بخش ادمین: روشن کردن
+// ادمین: روشن کردن
 bot.action('admin_on', async (ctx) => {
     if (ctx.from.id !== ADMIN_ID) return;
     const db = loadData();
@@ -230,7 +232,6 @@ bot.action('build_panel', async (ctx) => {
         return ctx.answerCbQuery('لطفا ابتدا از گزینه مدیریت توکن، توکن ثبت کنید!', { show_alert: true });
     }
 
-    // نمایش لیست توکن‌ها جهت انتخاب برای ساخت پنل
     const buttons = userTokens.map((t, idx) => [
         Markup.button.callback(`🔹 توکن شماره ${idx + 1} (...${t.token.slice(-6)})`, `select_token_${idx}`)
     ]);
@@ -241,23 +242,21 @@ bot.action('build_panel', async (ctx) => {
 
 // انتخاب توکن و نمایش لیست پنل‌ها
 bot.action(/select_token_(\d+)/, async (ctx) => {
-    const tokenIndex = ctx.match[1];
     await ctx.editMessageText(
         `👑 کدام پنل را می‌خواهید بسازید؟\n\nمخزن گیت‌هاب: luffy-sh-op/LUFFY_PANEL`,
         Markup.inlineKeyboard([
-            [Markup.button.callback('👑 Luffy Panel (شروع ساخت)', `deploy_luffy_${tokenIndex}`)],
+            [Markup.button.callback('👑 Luffy Panel (شروع ساخت)', 'deploy_luffy')],
             [Markup.button.callback('🔙 بازگشت', 'build_panel')]
         ])
     );
 });
 
-// استارت فرآیند ساخت و دیپلوی (شبیه‌سازی اتصال به گیت‌هاب و ریلی‌وی و ساخت دامین پورت 8080)
-bot.action(/deploy_luffy_(\d+)/, async (ctx) => {
+// شبیه‌سازی دیپلوی و ساخت دامین
+bot.action('deploy_luffy', async (ctx) => {
     await ctx.editMessageText('⏳ در حال اتصال به گیت‌هاب برای فورک مخزن و راه‌اندازی روی ریلی‌وی...');
 
-    // شبیه‌سازی ساخت دامین و پورت 8080 روی Railway
     setTimeout(async () => {
-        const randomId = Math.random().toString(36.substring(2, 8));
+        const randomId = Math.random().toString(36).substring(2, 8);
         const panelLink = `https://kia-nex-${randomId}.railway.app/dashboard`;
 
         const successText = `🎉 پنل با موفقیت ساخته شد!
@@ -279,9 +278,8 @@ admin
 
 // اجرای ربات
 bot.launch().then(() => {
-    console.log('KIA Nex Bot is running successfully!');
+    console.log('KIA Nex Bot is running successfully with Volume storage (/data)!');
 });
 
-// مدیریت خروج ایمن
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
