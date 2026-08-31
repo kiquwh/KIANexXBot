@@ -70,10 +70,44 @@ async function deployLuffyPanelToRailway(userTokenObj, ctx) {
         // گام ۱: ساخت پروژه جدید
         await ctx.editMessageText('⏳ قدم ۱/۴: در حال ساخت پروژه جدید در حساب ریلی‌وی شما...');
         
-        const projectInput = { name: "KIA-Nex-Panel" };
-        if (userTokenObj.workspaceId) {
-            projectInput.teamId = userTokenObj.workspaceId; // استفاده از teamId برای سازگاری با API ریلی‌وی
+ const projectInput = {
+    name: `KIA-Nex-Panel-${Date.now()}`
+};
+
+const createProjectRes = await axios.post(
+    'https://backboard.railway.com/graphql/v2',
+    {
+        query: `
+            mutation projectCreate($input: ProjectCreateInput!) {
+                projectCreate(input: $input) {
+                    id
+                    name
+                }
+            }
+        `,
+        variables: {
+            input: projectInput
         }
+    },
+    { headers }
+);
+
+if (createProjectRes.data?.errors?.length) {
+    throw new Error(
+        createProjectRes.data.errors
+            .map(e => e.message)
+            .join(' | ')
+    );
+}
+
+const projectId =
+    createProjectRes.data?.data?.projectCreate?.id;
+
+if (!projectId) {
+    throw new Error(
+        'Railway پروژه را ساخت اما شناسه پروژه دریافت نشد.'
+    );
+}
 
         const createProjectRes = await axios.post('https://backboard.railway.app/graphql/v2', {
             query: `mutation ($input: ProjectCreateInput!) { projectCreate(input: $input) { id } }`,
