@@ -35,16 +35,23 @@ function saveData(data) {
     fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
 }
 
-// معتبرسازی توکن ریلی‌وی و دریافت اطلاعات اکانت
+// معتبرسازی توکن ریلی‌وی و دریافت اطلاعات و Workspace کاربر
 async function validateRailwayToken(token) {
     try {
         const response = await axios.post('https://backboard.railway.app/graphql/v2', {
-            query: `query { me { email name } }`
+            query: `query { me { email name workspaces { id name } } }`
         }, {
             headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }
         });
+        
         if (response.data && response.data.data && response.data.data.me) {
-            return { valid: true, email: response.data.data.me.email || 'user@railway.app' };
+            const me = response.data.data.me;
+            const workspaces = me.workspaces || [];
+            return { 
+                valid: true, 
+                email: me.email || 'user@railway.app',
+                workspaceId: workspaces.length > 0 ? workspaces[0].id : null
+            };
         }
     } catch (e) {
         return { valid: false };
@@ -52,43 +59,25 @@ async function validateRailwayToken(token) {
     return { valid: false };
 }
 
-// تابع واقعی و اصلاح‌شده برای ساخت پروژه با گرفتن Workspace ID
-async function deployLuffyPanelToRailway(railwayToken, ctx) {
+// تابع ساخت واقعی و قدم‌به‌قدم روی ریلی‌وی
+async function deployLuffyPanelToRailway(userTokenObj, ctx) {
     const headers = {
-        'Authorization': `Bearer ${railwayToken}`,
+        'Authorization': `Bearer ${userTokenObj.railwayToken}`,
         'Content-Type': 'application/json'
     };
 
     try {
-        // گام 0: پیدا کردن Workspace ID کاربر
-        await ctx.editMessageText('⏳ در حال دریافت اطلاعات فضای کاری (Workspace) از حساب ریلی‌وی...');
-        
-        const workspacesRes = await axios.post('https://backboard.railway.app/graphql/v2', {
-            query: `query { workspaces { id name } }`
-        }, { headers });
-
-        if (workspacesRes.data.errors) {
-            throw new Error(workspacesRes.data.errors[0].message);
-        }
-
-        const workspaces = workspacesRes.data?.data?.workspaces;
-        if (!workspaces || workspaces.length === 0) {
-            throw new Error('هیچ Workspace یا تیمی در حساب ریلی‌وی شما یافت نشد.');
-        }
-
-        const workspaceId = workspaces[0].id; // انتخاب اولین فضای کاری پیش‌فرض
-
-        // گام ۱: ایجاد پروژه جدید با ارسال workspaceId
+        // گام ۱: ساخت پروژه جدید
         await ctx.editMessageText('⏳ قدم ۱/۴: در حال ساخت پروژه جدید در حساب ریلی‌وی شما...');
         
+        const projectInput = { name: "KIA-Nex-Panel" };
+        if (userTokenObj.workspaceId) {
+            projectInput.teamId = userTokenObj.workspaceId; // استفاده از teamId برای سازگاری با API ریلی‌وی
+        }
+
         const createProjectRes = await axios.post('https://backboard.railway.app/graphql/v2', {
             query: `mutation ($input: ProjectCreateInput!) { projectCreate(input: $input) { id } }`,
-            variables: {
-                input: {
-                    name: "KIA-Nex-Panel",
-                    workspaceId: workspaceId
-                }
-            }
+            variables: { input: projectInput }
         }, { headers });
 
         if (createProjectRes.data.errors) {
@@ -96,7 +85,7 @@ async function deployLuffyPanelToRailway(railwayToken, ctx) {
         }
 
         const projectId = createProjectRes.data?.data?.projectCreate?.id;
-        if (!projectId) throw new Error('خطا در دریافت شناسه پروژه.');
+        if (!projectId) throw new Error('خطا در دریافت شناسه پروژه از ریلی‌وی.');
 
         // گام ۲: دیپلوی مخزن گیت‌هاب (luffy-sh-op/LUFFY_PANEL)
         await ctx.editMessageText('⏳ قدم ۲/۴: در حال اتصال و فورک مخزن گیت‌هاب (LUFFY_PANEL)...');
@@ -177,8 +166,8 @@ admin
         ]));
 
     } catch (error) {
-        console.error('Railway API Error:', error.response?.data || error.message);
-        await ctx.editMessageText(`❌ خطا در ساخت پنل روی ریلی‌وی!\n\nجزئیات خطا: ${error.message}\n\nلطفاً مطمئن شوید توکن Railway معتبر است و دسترسی کافی دارد.`, Markup.inlineKeyboard([
+        const errorMsg = error.response?.data?.errors?.[0]?.message || error.message;
+        await ctx.editMessageText(`❌ خطا در ساخت پنل روی ریلی‌وی!\n\nجزئیات خطا: ${errorMsg}\n\nلطفاً مطمئن شوید توکن Railway معتبر است و دسترسی کافی دارد.`, Markup.inlineKeyboard([
             [Markup.button.callback('🔙 بازگشت', 'build_panel')]
         ]));
     }
@@ -307,7 +296,8 @@ bot.on('text', async (ctx) => {
         if (!db.tokens[userId]) db.tokens[userId] = [];
         db.tokens[userId].push({
             railwayToken: text,
-            email: status.email
+            email: status.email,
+            workspaceId: status.workspaceId
         });
         saveData(db);
 
@@ -375,11 +365,11 @@ bot.action(/deploy_luffy_(\d+)/, async (ctx) => {
         return ctx.answerCbQuery('خطا: توکن یافت نشد!', { show_alert: true });
     }
 
-    await deployLuffyPanelToRailway(userTokenObj.railwayToken, ctx);
+    await deployLuffyPanelToRailway(userTokenObj, ctx);
 });
 
 bot.launch().then(() => {
-    console.log('KIA Nex Bot is running successfully with workspace support!');
+    console.log('KIA Nex Bot is running successfully!');
 });
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
